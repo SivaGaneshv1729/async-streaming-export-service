@@ -1,0 +1,63 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    container_name: async-streaming-export-app
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - PORT=8080
+      - DB_CURSOR_BATCH_SIZE=${DB_CURSOR_BATCH_SIZE:-1000}
+      - EXPORT_STORAGE_PATH=${EXPORT_STORAGE_PATH:-/app/exports}
+      - NODE_ENV=production
+    mem_limit: 150m
+    volumes:
+      - export_files:/app/exports
+    networks:
+      - export-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  db:
+    image: postgres:15
+    container_name: async-streaming-export-db
+    environment:
+      - POSTGRES_USER=${DB_USER:-exporter}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-secret}
+      - POSTGRES_DB=${DB_NAME:-exports_db}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./seeds:/docker-entrypoint-initdb.d
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-exporter} -d ${DB_NAME:-exports_db}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - export-net
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  export_files:
+
+networks:
+  export-net:
+    driver: bridge

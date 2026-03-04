@@ -1,0 +1,7 @@
+node_modules/
+.env
+exports/
+*.csv
+*.gz
+npm-debug.log*
+.DS_Store
