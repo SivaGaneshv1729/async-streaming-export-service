@@ -6,8 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-const { createJob, getJob, deleteJob } = require('../jobs');
-const { startWorker } = require('../worker');
+const { addExportJob, getJobStatus, cancelExportJob } = require('../queue');
 const { buildSelectClause, ALLOWED_COLUMNS, ALL_COLUMNS } = require('../db');
 
 const VALID_TIERS = new Set(['free', 'basic', 'premium', 'enterprise']);
@@ -15,7 +14,7 @@ const EXPORT_DIR = process.env.EXPORT_STORAGE_PATH || '/app/exports';
 
 // ── POST /exports/csv ─────────────────────────────────────────────────────────
 // Initiates a background CSV export job and returns 202 immediately.
-router.post('/csv', (req, res) => {
+router.post('/csv', async (req, res) => {
   // ── Parse and validate query params ──────────────────────────────────────
   const {
     country_code,
@@ -66,8 +65,8 @@ router.post('/csv', (req, res) => {
     });
   }
 
-  // ── Create job and start background worker ────────────────────────────────
-  const job = createJob({
+  // ── Create job and add to Redis queue ─────────────────────────────────────
+  const jobData = {
     columns: cols,
     delimiter,
     quoteChar,
@@ -76,137 +75,146 @@ router.post('/csv', (req, res) => {
       subscriptionTier: subscription_tier || null,
       minLtv,
     },
-  });
+  };
 
-  startWorker(job.exportId);
-
-  return res.status(202).json({
-    exportId: job.exportId,
-    status: job.status,
-  });
+  try {
+    const exportId = await addExportJob(jobData);
+    return res.status(202).json({
+      exportId,
+      status: 'pending',
+    });
+  } catch (err) {
+    console.error('Failed to enqueue job:', err);
+    return res.status(500).json({ error: 'Failed to enqueue export job' });
+  }
 });
 
 // ── GET /exports/:id/status ───────────────────────────────────────────────────
-router.get('/:id/status', (req, res) => {
-  const job = getJob(req.params.id);
-  if (!job) {
-    return res.status(404).json({ error: 'Export job not found.' });
+router.get('/:id/status', async (req, res) => {
+  try {
+    const statusObj = await getJobStatus(req.params.id);
+    if (!statusObj) {
+      return res.status(404).json({ error: 'Export job not found.' });
+    }
+    return res.status(200).json(statusObj);
+  } catch (err) {
+    console.error('Failed to get job status:', err);
+    return res.status(500).json({ error: 'Failed to retrieve job status' });
   }
-
-  return res.status(200).json({
-    exportId:    job.exportId,
-    status:      job.status,
-    progress:    job.progress,
-    error:       job.error,
-    createdAt:   job.createdAt,
-    completedAt: job.completedAt,
-  });
 });
 
 // ── GET /exports/:id/download ─────────────────────────────────────────────────
-router.get('/:id/download', (req, res) => {
-  const job = getJob(req.params.id);
+router.get('/:id/download', async (req, res) => {
+  try {
+    const job = await getJobStatus(req.params.id);
 
-  if (!job) {
-    return res.status(404).json({ error: 'Export job not found.' });
-  }
-
-  if (job.status === 'processing' || job.status === 'pending') {
-    return res.status(425).json({
-      error: 'Export is still in progress. Poll /status until status is "completed".',
-      status: job.status,
-      progress: job.progress,
-    });
-  }
-
-  if (job.status !== 'completed' || !job.filePath) {
-    return res.status(404).json({
-      error: `Export is not available (status: ${job.status}).`,
-    });
-  }
-
-  // Verify file still exists
-  if (!fs.existsSync(job.filePath)) {
-    return res.status(404).json({ error: 'Export file not found on disk.' });
-  }
-
-  const filename = `export_${job.exportId}.csv`;
-  const fileStat = fs.statSync(job.filePath);
-  const fileSize = fileStat.size;
-
-  // Detect gzip preference
-  const acceptEncoding = req.headers['accept-encoding'] || '';
-  const wantsGzip = acceptEncoding.includes('gzip');
-
-  // ── Range request (resumable downloads) ──────────────────────────────────
-  const rangeHeader = req.headers['range'];
-
-  if (rangeHeader && !wantsGzip) {
-    const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
-    if (!match) {
-      return res.status(416).send('Range Not Satisfiable');
+    if (!job) {
+      return res.status(404).json({ error: 'Export job not found.' });
     }
 
-    const start = match[1] ? parseInt(match[1], 10) : 0;
-    const end   = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-
-    if (start > end || start >= fileSize) {
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.status(416).send('Range Not Satisfiable');
+    if (job.status === 'processing' || job.status === 'pending') {
+      return res.status(425).json({
+        error: 'Export is still in progress. Poll /status until status is "completed".',
+        status: job.status,
+        progress: job.progress,
+      });
     }
 
-    const chunkSize = end - start + 1;
+    if (job.status !== 'completed' || !job.filePath) {
+      return res.status(404).json({
+        error: `Export is not available (status: ${job.status}).`,
+      });
+    }
 
-    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-    res.setHeader('Content-Length', chunkSize);
+    // Verify file still exists
+    if (!fs.existsSync(job.filePath)) {
+      return res.status(404).json({ error: 'Export file not found on disk.' });
+    }
+
+    const filename = `export_${job.exportId}.csv`;
+    const fileStat = fs.statSync(job.filePath);
+    const fileSize = fileStat.size;
+
+    // Detect gzip preference
+    const acceptEncoding = req.headers['accept-encoding'] || '';
+    const wantsGzip = acceptEncoding.includes('gzip');
+
+    // ── Range request (resumable downloads) ──────────────────────────────────
+    const rangeHeader = req.headers['range'];
+
+    if (rangeHeader && !wantsGzip) {
+      const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
+      if (!match) {
+        return res.status(416).send('Range Not Satisfiable');
+      }
+
+      const start = match[1] ? parseInt(match[1], 10) : 0;
+      const end   = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+      if (start > end || start >= fileSize) {
+        res.setHeader('Content-Range', `bytes */${fileSize}`);
+        return res.status(416).send('Range Not Satisfiable');
+      }
+
+      const chunkSize = end - start + 1;
+
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+      res.setHeader('Content-Length', chunkSize);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.status(206);
+
+      const readStream = fs.createReadStream(job.filePath, { start, end });
+      readStream.pipe(res);
+      return;
+    }
+
+    // ── Full download ─────────────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Accept-Ranges', 'bytes');
-    res.status(206);
 
-    const readStream = fs.createReadStream(job.filePath, { start, end });
-    readStream.pipe(res);
-    return;
-  }
+    if (wantsGzip) {
+      // On-the-fly gzip: content-length is unknown → use chunked transfer
+      res.setHeader('Content-Encoding', 'gzip');
+      res.removeHeader('Content-Length');
 
-  // ── Full download ─────────────────────────────────────────────────────────
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.setHeader('Accept-Ranges', 'bytes');
-
-  if (wantsGzip) {
-    // On-the-fly gzip: content-length is unknown → use chunked transfer
-    res.setHeader('Content-Encoding', 'gzip');
-    res.removeHeader('Content-Length');
-
-    const readStream = fs.createReadStream(job.filePath);
-    const gzip = zlib.createGzip();
-    readStream.pipe(gzip).pipe(res);
-  } else {
-    res.setHeader('Content-Length', fileSize);
-    const readStream = fs.createReadStream(job.filePath);
-    readStream.pipe(res);
+      const readStream = fs.createReadStream(job.filePath);
+      const gzip = zlib.createGzip();
+      readStream.pipe(gzip).pipe(res);
+    } else {
+      res.setHeader('Content-Length', fileSize);
+      const readStream = fs.createReadStream(job.filePath);
+      readStream.pipe(res);
+    }
+  } catch (err) {
+    console.error('Failed to handle download request:', err);
+    return res.status(500).json({ error: 'Internal server error while processing download' });
   }
 });
 
 // ── DELETE /exports/:id ───────────────────────────────────────────────────────
-router.delete('/:id', (req, res) => {
-  const job = getJob(req.params.id);
-  if (!job) {
-    return res.status(404).json({ error: 'Export job not found.' });
+router.delete('/:id', async (req, res) => {
+  try {
+    const job = await getJobStatus(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Export job not found.' });
+    }
+
+    // Signal cooperative cancellation via Redis
+    await cancelExportJob(req.params.id);
+
+    // If already completed, clean up the file
+    if (job.status === 'completed' && job.filePath) {
+      fs.unlink(job.filePath, () => {});
+    }
+
+    return res.status(204).end();
+  } catch (err) {
+    console.error('Failed to cancel job:', err);
+    return res.status(500).json({ error: 'Failed to cancel export job' });
   }
-
-  // Signal cooperative cancellation
-  job.cancelToken.cancelled = true;
-
-  // If already completed, clean up the file and remove the job record
-  if (job.status === 'completed' && job.filePath) {
-    fs.unlink(job.filePath, () => {});
-  }
-
-  deleteJob(job.exportId);
-
-  return res.status(204).end();
 });
 
 module.exports = router;
