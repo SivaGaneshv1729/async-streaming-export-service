@@ -5,7 +5,7 @@ const path = require('path');
 const { Worker } = require('bullmq');
 const { stringify } = require('csv-stringify');
 const { streamRowsKeyset, countRows, buildSelectClause, ALL_COLUMNS } = require('./db');
-const { connection } = require('./queue');
+const { connection, exportQueue } = require('./queue');
 
 const EXPORT_DIR = process.env.EXPORT_STORAGE_PATH || '/app/exports';
 
@@ -90,7 +90,7 @@ const worker = new Worker('export-jobs', async (job) => {
     for await (const batch of streamRowsKeyset(sql, params)) {
       
       // Cooperative cancellation check - query Redis to see if data.cancelled flag was set
-      const currentJobInfo = await job.queue.getJob(job.id);
+      const currentJobInfo = await exportQueue.getJob(job.id);
       if (currentJobInfo && currentJobInfo.data && currentJobInfo.data.cancelled) {
         csvStringifier.destroy();
         fileStream.destroy();

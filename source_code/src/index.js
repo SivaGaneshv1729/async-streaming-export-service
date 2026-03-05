@@ -4,6 +4,7 @@ const fs = require('fs');
 const express = require('express');
 const exportsRouter = require('./routes/exports');
 const healthRouter  = require('./routes/health');
+require('./worker'); // Start the BullMQ background worker
 
 const app = express();
 const PORT = process.env.PORT || 8080;
