@@ -142,10 +142,15 @@ Cancel and remove an export job.
 ```
 async-streaming-export-service/
 ├── Dockerfile                  # Multi-stage build, non-root user
-├── docker-compose.yml          # App (150m mem) + PostgreSQL 15
+├── docker-compose.yml          # App (150m mem) + PostgreSQL 15 + Redis
 ├── .env.example                # All required environment variables
 ├── .gitignore
 ├── README.md
+├── docs/                       # Detailed Documentation
+│   ├── architecture.md         # Architecture flowchart & backpressure concept
+│   ├── api.md                  # REST Endpoint specifications
+│   ├── database.md             # ERD and Indexing decisions
+│   └── deployment.md           # Docker multi-container scaling guide
 ├── seeds/
 │   └── init.sql                # Schema + 10M row seed via generate_series
 ├── source_code/
@@ -203,24 +208,4 @@ docker stats async-streaming-export-app --no-stream
 
 ## Architecture
 
-```
-Client
-  │
-  ▼
-POST /exports/csv  →  validate  →  createJob()  →  startWorker()  →  202 { exportId }
-                                                        │ (async, non-blocking)
-                                                        ▼
-                                               countRows → totalRows
-                                               streamRows (pg-cursor, 1000/batch)
-                                                 ↓ batch
-                                               csv-stringify → FileWriteStream
-                                               update progress per batch
-                                               check cancelToken each batch
-                                                        │
-                                                        ▼
-                                               job.status = 'completed'
-
-GET /exports/:id/status   →  returns live progress object
-GET /exports/:id/download →  serve file (Range / gzip / full)
-DELETE /exports/:id       →  cancelToken.cancelled = true → 204
-```
+For a deep dive into how compiling **Backpressure**, **Stateless Keyset Pagination**, and **Redis/BullMQ Background workers** resolves OOM crashes for massive datasets, please read the [Architecture Documentation](./docs/architecture.md).
