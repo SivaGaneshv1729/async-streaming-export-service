@@ -9,8 +9,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - PORT=8080
       - DB_CURSOR_BATCH_SIZE=${DB_CURSOR_BATCH_SIZE:-1000}
       - EXPORT_STORAGE_PATH=${EXPORT_STORAGE_PATH:-/app/exports}
@@ -50,6 +53,20 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
+    networks:
+      - export-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: async-streaming-export-redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - export-net
     restart: unless-stopped

@@ -1,7 +1,47 @@
 'use strict';
 
 const request = require('supertest');
+
+// ── Mock Redis and BullMQ ─────────────────────────────────────────────────────
+jest.mock('ioredis', () => {
+  return jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    off: jest.fn(),
+    quit: jest.fn(),
+    disconnect: jest.fn(),
+  }));
+});
+
+let mockJobStore = {};
+
+jest.mock('bullmq', () => {
+  return {
+    Queue: jest.fn().mockImplementation(() => ({
+      add: jest.fn((name, data, opts) => {
+        const id = opts.jobId;
+        mockJobStore[id] = {
+          id,
+          data,
+          getState: jest.fn().mockResolvedValue('active'),
+          progress: { totalRows: 100, processedRows: 50, percentage: 50 },
+          updateData: jest.fn((newData) => { mockJobStore[id].data = newData; }),
+        };
+        return mockJobStore[id];
+      }),
+      getJob: jest.fn(async (id) => mockJobStore[id] || null),
+    })),
+    Worker: jest.fn().mockImplementation(() => ({
+      on: jest.fn(),
+      close: jest.fn(),
+    })),
+  };
+});
+
 const app = require('../source_code/src/index');
+
+afterEach(() => {
+  mockJobStore = {};
+});
 
 // ── GET /health ───────────────────────────────────────────────────────────────
 describe('GET /health', () => {
@@ -126,9 +166,10 @@ describe('DELETE /exports/:id', () => {
     const delRes = await request(app).delete(`/exports/${exportId}`);
     expect(delRes.status).toBe(204);
 
-    // Job should now 404
+    // Job data is mutated to cancelled=true
     const statusRes = await request(app).get(`/exports/${exportId}/status`);
-    expect(statusRes.status).toBe(404);
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.status).toBe('cancelled');
   });
 });
 
