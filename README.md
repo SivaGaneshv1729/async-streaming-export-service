@@ -1,4 +1,4 @@
-# Async Streaming Export Service
+# Large-Scale CSV Export Service with Async Streaming and Progress Tracking
 
 A high-performance Node.js service that **asynchronously exports millions of PostgreSQL rows to CSV** with progress tracking, resumable downloads, gzip compression, column selection, and custom CSV formatting — all within a **150 MB memory limit**.
 
@@ -7,7 +7,7 @@ A high-performance Node.js service that **asynchronously exports millions of Pos
 ## Features
 
 | Feature                    | Details                                                                        |
-| -------------------------- | ------------------------------------------------------------------------------ | ------------------ |
+| -------------------------- | ------------------------------------------------------------------------------ |
 | **Async job model**        | `POST` returns immediately with a job ID; export runs in the background        |
 | **Progress tracking**      | Live `processedRows`, `totalRows`, `percentage` via polling                    |
 | **Cursor-based streaming** | Fetches rows in configurable batches (`DB_CURSOR_BATCH_SIZE`), O(batch) memory |
@@ -15,7 +15,7 @@ A high-performance Node.js service that **asynchronously exports millions of Pos
 | **Resumable downloads**    | HTTP `Range` / `206 Partial Content` support                                   |
 | **On-the-fly gzip**        | Pass `Accept-Encoding: gzip` on download                                       |
 | **Column selection**       | `?columns=id,email,country_code`                                               |
-| **Custom CSV formatting**  | `?delimiter=                                                                   | `and`?quoteChar='` |
+| **Custom CSV formatting**  | `?delimiter=\|` and `?quoteChar='` (Escaped pipe)                              |
 | **Filtering**              | `country_code`, `subscription_tier`, `min_ltv`                                 |
 | **Job cancellation**       | `DELETE /exports/:id` stops the worker and removes the file                    |
 | **10M row dataset**        | Auto-seeded on first start via pure-SQL `generate_series`                      |
@@ -158,7 +158,7 @@ async-streaming-export-service/
 │   └── src/
 │       ├── index.js            # Express entry point
 │       ├── db.js               # pg Pool + cursor AsyncGenerator
-│       ├── jobs.js             # In-memory job store
+│       ├── queue.js            # BullMQ Redis Queue manager
 │       ├── worker.js           # Background streaming + progress updates
 │       └── routes/
 │           ├── exports.js      # All /exports/* endpoints
