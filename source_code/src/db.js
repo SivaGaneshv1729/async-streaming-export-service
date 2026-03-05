@@ -1,7 +1,6 @@
 'use strict';
 
 const { Pool } = require('pg');
-const Cursor = require('pg-cursor');
 
 // ── Connection Pool ───────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -54,29 +53,54 @@ async function countRows(where, params = []) {
 }
 
 /**
- * Opens a pg-cursor and yields row batches.
- * Memory usage is O(batchSize), not O(totalRows).
+ * Implements stateless Keyset Pagination (`WHERE id > last_id ORDER BY id`).
+ * Releases the DB connection back to the pool *between* batches.
  *
- * @param {string} sql
- * @param {Array}  params
+ * @param {string} baseSql - Ensure it DOES NOT contain an ORDER BY clause.
+ * @param {Array}  params  - Bound parameters matching the WHERE clause inside baseSql.
  * @param {number} [batchSize]
  * @returns {AsyncGenerator<object[]>}
  */
-async function* streamRows(sql, params = [], batchSize) {
+async function* streamRowsKeyset(baseSql, params = [], batchSize) {
   const size = batchSize || parseInt(process.env.DB_CURSOR_BATCH_SIZE, 10) || 1000;
-  const client = await pool.connect();
+  let lastId = 0; // Assuming `id` is a strictly positive SERIAL primary key
 
-  try {
-    const cursor = client.query(new Cursor(sql, params));
-    while (true) {
-      const rows = await cursor.read(size);
-      if (rows.length === 0) break;
-      yield rows;
+  // We append the keyset condition.
+  // E.g: "SELECT ... FROM ... WHERE ... AND id > $lastId ORDER BY id LIMIT $limit"
+  // If baseSql has no WHERE, we add one.
+  const hasWhere = baseSql.toUpperCase().includes(' WHERE ');
+  const linkWord = hasWhere ? ' AND' : ' WHERE';
+
+  let done = false;
+
+  while (!done) {
+    // 1. We allocate the DB connection dynamically per-batch
+    const client = await pool.connect();
+
+    try {
+      // 2. Build the exact query
+      // The params array has length N. 
+      // lastId will be param N+1
+      const queryParams = [...params, lastId];
+      const idParamIdx = queryParams.length; // 1-indexed for postgres, e.g. $1
+
+      const keysetSql = `${baseSql}${linkWord} id > $${idParamIdx} ORDER BY id ASC LIMIT ${size}`;
+      
+      // 3. Execute
+      const { rows } = await client.query(keysetSql, queryParams);
+      
+      if (rows.length === 0) {
+        done = true;
+      } else {
+        lastId = rows[rows.length - 1].id;
+        yield rows;
+      }
+
+    } finally {
+      // 4. Critically: Release the connection back to the pool instantly
+      client.release();
     }
-    await cursor.close();
-  } finally {
-    client.release();
   }
 }
 
-module.exports = { pool, streamRows, countRows, buildSelectClause, ALLOWED_COLUMNS, ALL_COLUMNS };
+module.exports = { pool, streamRowsKeyset, countRows, buildSelectClause, ALLOWED_COLUMNS, ALL_COLUMNS };
